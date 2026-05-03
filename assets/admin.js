@@ -133,9 +133,19 @@
           status.textContent = "Done.";
           if (download) {
             download.style.display = "block";
-            download.innerHTML = data.downloadUrl
-              ? `<a class="button button-secondary" href="${data.downloadUrl}">Download Archive</a>`
-              : "";
+            if (data.downloadUrls && data.downloadUrls.length) {
+              const links = data.downloadUrls
+                .map(
+                  (p) =>
+                    `<li><a class="button button-secondary" href="${p.url}">Download ${p.file}</a> <span style="opacity:.8">(${p.files} files, ${formatBytes(
+                      p.bytes
+                    )})</span></li>`
+                )
+                .join("");
+              download.innerHTML = `<p><strong>Archive parts</strong> (upload each part on live)</p><ul>${links}</ul>`;
+            } else {
+              download.innerHTML = "";
+            }
           }
           break;
         }
@@ -150,33 +160,53 @@
     const fileInput = el("uploads-migration-archive");
     const overwrite = el("uploads-migration-overwrite");
     try {
-      if (!fileInput || !fileInput.files || !fileInput.files[0]) {
-        throw new Error("Choose an archive first.");
+      if (!fileInput || !fileInput.files || !fileInput.files.length) {
+        throw new Error("Choose one or more archive parts first.");
       }
-      status.textContent = "Uploading...";
-      const token = await uploadArchive(fileInput.files[0]);
+      const files = Array.from(fileInput.files);
+      const doOverwrite = overwrite && overwrite.checked ? "1" : "";
 
-      status.textContent = "Starting import...";
-      const { state: initialState } = await post("uploads_migration_start_import", {
-        token,
-        overwrite: overwrite && overwrite.checked ? "1" : "",
-      });
-      let state = initialState;
+      const grand = { imported: 0, skipped: 0, overwritten: 0, errors: 0 };
 
-      renderImportProgress(state);
-      renderImportSummary(state);
-      status.textContent = "Importing...";
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        status.textContent = `Uploading part ${i + 1}/${files.length}...`;
+        const token = await uploadArchive(f);
 
-      while (true) {
-        const data = await post("uploads_migration_import_batch", { id: state.id });
-        state = data.state;
+        status.textContent = `Starting import part ${i + 1}/${files.length}...`;
+        const { state: initialState } = await post("uploads_migration_start_import", {
+          token,
+          overwrite: doOverwrite,
+        });
+        let state = initialState;
+
         renderImportProgress(state);
         renderImportSummary(state);
-        if (data.done) {
-          status.textContent = "Done.";
-          break;
+        status.textContent = `Importing part ${i + 1}/${files.length}...`;
+
+        while (true) {
+          const data = await post("uploads_migration_import_batch", { id: state.id });
+          state = data.state;
+          renderImportProgress(state);
+          renderImportSummary(state);
+          if (data.done) {
+            break;
+          }
+        }
+
+        const s = state.summary || {};
+        grand.imported += s.imported || 0;
+        grand.skipped += s.skipped || 0;
+        grand.overwritten += s.overwritten || 0;
+        grand.errors += s.errors || 0;
+
+        const summaryEl = el("uploads-migration-import-summary");
+        if (summaryEl) {
+          summaryEl.innerHTML += `<p><strong>Totals so far</strong>: Imported ${grand.imported}, Skipped ${grand.skipped}, Overwritten ${grand.overwritten}, Errors ${grand.errors}</p>`;
         }
       }
+
+      status.textContent = `Done. Imported ${grand.imported}, skipped ${grand.skipped}, overwritten ${grand.overwritten}, errors ${grand.errors}.`;
     } catch (e) {
       status.textContent = `Error: ${e.message}`;
     }

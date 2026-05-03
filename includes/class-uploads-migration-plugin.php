@@ -111,16 +111,31 @@ final class Uploads_Migration_Plugin {
 		}
 
 		$state = $result['state'];
-		$download_url = '';
-		if ( ! empty( $result['done'] ) && ! empty( $state['archive_path'] ) ) {
-			$download_url = $this->download_url_for_archive( (string) $state['archive_path'] );
+		$download_urls = array();
+		if ( ! empty( $result['done'] ) ) {
+			$archives = isset( $state['archives'] ) && is_array( $state['archives'] ) ? $state['archives'] : array();
+			foreach ( $archives as $archive ) {
+				if ( empty( $archive['file'] ) ) {
+					continue;
+				}
+				$file = sanitize_file_name( (string) $archive['file'] );
+				if ( '' === $file ) {
+					continue;
+				}
+				$download_urls[] = array(
+					'file' => $file,
+					'url'  => $this->download_url_for_file( $file ),
+					'files'=> (int) ( $archive['files'] ?? 0 ),
+					'bytes'=> (int) ( $archive['bytes'] ?? 0 ),
+				);
+			}
 		}
 
 		wp_send_json_success(
 			array(
 				'state'       => $state,
 				'done'        => ! empty( $result['done'] ),
-				'downloadUrl' => $download_url,
+				'downloadUrls' => $download_urls,
 			)
 		);
 	}
@@ -190,8 +205,7 @@ final class Uploads_Migration_Plugin {
 		);
 	}
 
-	private function download_url_for_archive( string $archive_path ): string {
-		$file = basename( $archive_path );
+	private function download_url_for_file( string $file ): string {
 		return add_query_arg(
 			array(
 				'action' => 'uploads_migration_download',
@@ -275,7 +289,7 @@ final class Uploads_Migration_Plugin {
 			<hr />
 
 			<h2>Import (Live)</h2>
-			<p>Uploads an archive and extracts it into <code>wp-content/uploads</code>. Existing files are skipped by default.</p>
+			<p>Uploads one or more archive parts and extracts them into <code>wp-content/uploads</code>. Existing files are skipped by default.</p>
 			<p>
 				<label>
 					<input type="checkbox" id="uploads-migration-overwrite" />
@@ -283,7 +297,7 @@ final class Uploads_Migration_Plugin {
 				</label>
 			</p>
 			<p>
-				<input type="file" id="uploads-migration-archive" accept=".zip,.tar.gz" />
+				<input type="file" id="uploads-migration-archive" accept=".zip,.tar.gz" multiple />
 				<button class="button button-primary" id="uploads-migration-start-import">Upload &amp; Start Import</button>
 				<span id="uploads-migration-import-status" style="margin-left:10px;"></span>
 			</p>

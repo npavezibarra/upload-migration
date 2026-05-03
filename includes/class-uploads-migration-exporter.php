@@ -7,6 +7,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Uploads_Migration_Exporter {
 	public const MODE = 'export';
+	public const DEFAULT_MAX_ARCHIVE_BYTES = 200000000; // ~200 MB per part (uncompressed estimate).
 
 	public static function start(): array {
 		Uploads_Migration_Storage::ensure_storage_ready();
@@ -18,12 +19,14 @@ final class Uploads_Migration_Exporter {
 		$uploads_dir = Uploads_Migration_Path::uploads_base_dir();
 		$uploads_dir = rtrim( Uploads_Migration_Path::normalize( $uploads_dir ), '/' );
 
-		$archive_name = sprintf(
-			'uploads-%s-%s.zip',
+		$archive_prefix = sprintf(
+			'uploads-%s-%s',
 			gmdate( 'Ymd-His' ),
 			sanitize_file_name( wp_parse_url( home_url(), PHP_URL_HOST ) ?: 'site' )
 		);
-		$archive_path = trailingslashit( Uploads_Migration_Storage::exports_dir() ) . $archive_name;
+		$archive_part  = 1;
+		$archive_name  = self::archive_part_name( $archive_prefix, $archive_part );
+		$archive_path  = trailingslashit( Uploads_Migration_Storage::exports_dir() ) . $archive_name;
 		$manifest_path = trailingslashit( Uploads_Migration_Storage::states_dir() ) . 'manifest-' . $id . '.txt';
 
 		Uploads_Migration_Storage::log( 'Export scan started', array( 'uploads_dir' => $uploads_dir, 'id' => $id ) );
@@ -57,7 +60,13 @@ final class Uploads_Migration_Exporter {
 			'id'              => $id,
 			'mode'            => self::MODE,
 			'archive_type'    => 'zip',
+			'archive_prefix'  => $archive_prefix,
+			'archive_part'    => $archive_part,
 			'archive_path'    => $archive_path,
+			'max_archive_bytes' => (int) apply_filters( 'uploads_migration_max_archive_bytes', self::DEFAULT_MAX_ARCHIVE_BYTES ),
+			'archives'        => array(), // Completed parts.
+			'current_archive_files' => 0,
+			'current_archive_bytes' => 0,
 			'manifest_path'   => $manifest_path,
 			'manifest_offset' => 0,
 			'uploads_dir'     => $uploads_dir,
@@ -94,8 +103,11 @@ final class Uploads_Migration_Exporter {
 		$manifest_path = (string) ( $state['manifest_path'] ?? '' );
 		$archive_path  = (string) ( $state['archive_path'] ?? '' );
 		$uploads_dir   = (string) ( $state['uploads_dir'] ?? '' );
+		$archive_prefix = (string) ( $state['archive_prefix'] ?? '' );
+		$archive_part  = (int) ( $state['archive_part'] ?? 1 );
+		$max_archive_bytes = (int) ( $state['max_archive_bytes'] ?? self::DEFAULT_MAX_ARCHIVE_BYTES );
 
-		if ( '' === $manifest_path || '' === $archive_path || '' === $uploads_dir ) {
+		if ( '' === $manifest_path || '' === $archive_path || '' === $uploads_dir || '' === $archive_prefix ) {
 			return array( 'ok' => false, 'error' => 'Export state is missing paths.' );
 		}
 		if ( ! file_exists( $manifest_path ) ) {
@@ -152,6 +164,44 @@ final class Uploads_Migration_Exporter {
 				continue;
 			}
 
+			$file_bytes = (int) filesize( $src_path );
+			$current_archive_bytes = (int) ( $state['current_archive_bytes'] ?? 0 );
+			$current_archive_files = (int) ( $state['current_archive_files'] ?? 0 );
+
+			// Rotate archive part when hitting size budget (best-effort, using uncompressed filesize sum).
+			if ( $current_archive_files > 0 && ( $current_archive_bytes + $file_bytes ) > $max_archive_bytes ) {
+				$zip->close();
+
+				$state['archives'][] = array(
+					'file'  => basename( $archive_path ),
+					'files' => $current_archive_files,
+					'bytes' => $current_archive_bytes,
+				);
+
+				$archive_part++;
+				$archive_name = self::archive_part_name( $archive_prefix, $archive_part );
+				$archive_path = trailingslashit( Uploads_Migration_Storage::exports_dir() ) . $archive_name;
+				$zip_ok = self::create_empty_zip( $archive_path );
+				if ( ! $zip_ok ) {
+					fclose( $fh );
+					return array( 'ok' => false, 'error' => 'Could not create next archive part.' );
+				}
+
+				$zip = new ZipArchive();
+				$zip_open = $zip->open( $archive_path, ZipArchive::CREATE );
+				if ( true !== $zip_open ) {
+					fclose( $fh );
+					return array( 'ok' => false, 'error' => 'Could not open next archive part.' );
+				}
+
+				$state['archive_part'] = $archive_part;
+				$state['archive_path'] = $archive_path;
+				$state['current_archive_files'] = 0;
+				$state['current_archive_bytes'] = 0;
+				$current_archive_files = 0;
+				$current_archive_bytes = 0;
+			}
+
 			$added = $zip->addFile( $src_path, $relative );
 			if ( ! $added ) {
 				$state['errors'][] = 'Failed to add: ' . $relative;
@@ -161,7 +211,9 @@ final class Uploads_Migration_Exporter {
 			}
 
 			$state['processed_files'] = (int) $state['processed_files'] + 1;
-			$state['processed_bytes'] = (int) $state['processed_bytes'] + (int) filesize( $src_path );
+			$state['processed_bytes'] = (int) $state['processed_bytes'] + $file_bytes;
+			$state['current_archive_files'] = (int) ( $state['current_archive_files'] ?? 0 ) + 1;
+			$state['current_archive_bytes'] = (int) ( $state['current_archive_bytes'] ?? 0 ) + $file_bytes;
 			$processed_this_batch++;
 		}
 
@@ -183,6 +235,17 @@ final class Uploads_Migration_Exporter {
 		// If we reached EOF, mark completed.
 		$done = self::manifest_is_complete( $manifest_path, (int) $state['manifest_offset'] );
 		if ( $done ) {
+			// Finalize current part into archives list.
+			$current_archive_files = (int) ( $state['current_archive_files'] ?? 0 );
+			$current_archive_bytes = (int) ( $state['current_archive_bytes'] ?? 0 );
+			$archive_path = (string) ( $state['archive_path'] ?? '' );
+			if ( $current_archive_files > 0 && '' !== $archive_path ) {
+				$state['archives'][] = array(
+					'file'  => basename( $archive_path ),
+					'files' => $current_archive_files,
+					'bytes' => $current_archive_bytes,
+				);
+			}
 			$state['completed'] = true;
 			Uploads_Migration_Storage::log( 'Export completed', array( 'id' => $id, 'processed_files' => $state['processed_files'] ) );
 		}
@@ -207,6 +270,11 @@ final class Uploads_Migration_Exporter {
 		}
 		$zip->close();
 		return true;
+	}
+
+	private static function archive_part_name( string $prefix, int $part ): string {
+		// uploads-YYYYmmdd-HHMMSS-host-part001.zip
+		return sprintf( '%s-part%03d.zip', $prefix, $part );
 	}
 
 	private static function scan_uploads_to_manifest( string $uploads_dir, string $manifest_path ): array {
