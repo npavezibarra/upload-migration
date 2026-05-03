@@ -1,0 +1,175 @@
+(function () {
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0;
+    let v = bytes;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  }
+
+  async function post(action, data) {
+    const body = new URLSearchParams();
+    body.set("action", action);
+    body.set("nonce", UploadsMigration.nonce);
+    Object.keys(data || {}).forEach((k) => body.set(k, data[k]));
+    const res = await fetch(UploadsMigration.ajaxUrl, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+      body,
+    });
+    const json = await res.json();
+    if (!json || !json.success) {
+      throw new Error((json && json.data && json.data.error) || "Request failed");
+    }
+    return json.data;
+  }
+
+  async function uploadArchive(file) {
+    const form = new FormData();
+    form.append("action", "uploads_migration_upload_archive");
+    form.append("nonce", UploadsMigration.nonce);
+    form.append("archive", file, file.name);
+
+    const res = await fetch(UploadsMigration.ajaxUrl, {
+      method: "POST",
+      credentials: "same-origin",
+      body: form,
+    });
+    const json = await res.json();
+    if (!json || !json.success) {
+      throw new Error((json && json.data && json.data.error) || "Upload failed");
+    }
+    return json.data.token;
+  }
+
+  function renderExportProgress(state) {
+    const container = el("uploads-migration-export-progress");
+    if (!container) return;
+    const total = state.total_files || 0;
+    const done = state.processed_files || 0;
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    container.innerHTML = `
+      <div style="border:1px solid #ccd0d4; height:18px; position:relative; background:#fff;">
+        <div style="width:${pct}%; height:18px; background:#2271b1;"></div>
+        <div style="position:absolute; top:0; left:0; right:0; height:18px; line-height:18px; text-align:center; font-size:12px; color:#111;">
+          ${pct}% (${done}/${total} files, ${formatBytes(state.processed_bytes)} / ${formatBytes(state.total_bytes)})
+        </div>
+      </div>`;
+  }
+
+  function renderImportProgress(state) {
+    const container = el("uploads-migration-import-progress");
+    if (!container) return;
+    const total = state.total_entries || 0;
+    const idx = state.current_index || 0;
+    const pct = total > 0 ? Math.min(100, Math.round((idx / total) * 100)) : 0;
+    container.innerHTML = `
+      <div style="border:1px solid #ccd0d4; height:18px; position:relative; background:#fff;">
+        <div style="width:${pct}%; height:18px; background:#2271b1;"></div>
+        <div style="position:absolute; top:0; left:0; right:0; height:18px; line-height:18px; text-align:center; font-size:12px; color:#111;">
+          ${total ? `${pct}% (${idx}/${total} entries)` : `Processed ${idx} entries`}
+        </div>
+      </div>`;
+  }
+
+  function renderImportSummary(state) {
+    const summaryEl = el("uploads-migration-import-summary");
+    if (!summaryEl) return;
+    const s = state.summary || {};
+    summaryEl.innerHTML = `
+      <p><strong>Summary</strong></p>
+      <ul>
+        <li>Imported: ${s.imported || 0}</li>
+        <li>Skipped: ${s.skipped || 0}</li>
+        <li>Overwritten: ${s.overwritten || 0}</li>
+        <li>Errors: ${s.errors || 0}</li>
+      </ul>`;
+  }
+
+  async function runExport() {
+    const status = el("uploads-migration-export-status");
+    const download = el("uploads-migration-export-download");
+    try {
+      status.textContent = "Scanning and starting...";
+      if (download) download.style.display = "none";
+
+      const { state: initialState } = await post("uploads_migration_start_export", {});
+      let state = initialState;
+      renderExportProgress(state);
+      status.textContent = "Exporting...";
+
+      while (true) {
+        const data = await post("uploads_migration_export_batch", { id: state.id });
+        state = data.state;
+        renderExportProgress(state);
+        if (data.done) {
+          status.textContent = "Done.";
+          if (download) {
+            download.style.display = "block";
+            download.innerHTML = data.downloadUrl
+              ? `<a class="button button-secondary" href="${data.downloadUrl}">Download Archive</a>`
+              : "";
+          }
+          break;
+        }
+      }
+    } catch (e) {
+      status.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  async function runImport() {
+    const status = el("uploads-migration-import-status");
+    const fileInput = el("uploads-migration-archive");
+    const overwrite = el("uploads-migration-overwrite");
+    try {
+      if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+        throw new Error("Choose an archive first.");
+      }
+      status.textContent = "Uploading...";
+      const token = await uploadArchive(fileInput.files[0]);
+
+      status.textContent = "Starting import...";
+      const { state: initialState } = await post("uploads_migration_start_import", {
+        token,
+        overwrite: overwrite && overwrite.checked ? "1" : "",
+      });
+      let state = initialState;
+
+      renderImportProgress(state);
+      renderImportSummary(state);
+      status.textContent = "Importing...";
+
+      while (true) {
+        const data = await post("uploads_migration_import_batch", { id: state.id });
+        state = data.state;
+        renderImportProgress(state);
+        renderImportSummary(state);
+        if (data.done) {
+          status.textContent = "Done.";
+          break;
+        }
+      }
+    } catch (e) {
+      status.textContent = `Error: ${e.message}`;
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    const exportBtn = el("uploads-migration-start-export");
+    if (exportBtn) exportBtn.addEventListener("click", runExport);
+
+    const importBtn = el("uploads-migration-start-import");
+    if (importBtn) importBtn.addEventListener("click", runImport);
+  });
+})();
+
