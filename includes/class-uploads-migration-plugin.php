@@ -69,6 +69,11 @@ final class Uploads_Migration_Plugin {
 	}
 
 	private function verify_nonce_or_die(): void {
+		// Avoid PHP notices polluting JSON output in admin-ajax responses.
+		if ( function_exists( 'wp_doing_ajax' ) && wp_doing_ajax() ) {
+			@ini_set( 'display_errors', '0' );
+		}
+
 		$nonce = isset( $_POST['nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['nonce'] ) ) : '';
 		if ( ! wp_verify_nonce( $nonce, 'uploads_migration_nonce' ) ) {
 			wp_send_json_error( array( 'error' => 'Invalid nonce.' ), 403 );

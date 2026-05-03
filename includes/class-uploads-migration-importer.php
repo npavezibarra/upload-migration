@@ -11,6 +11,24 @@ final class Uploads_Migration_Importer {
 	public static function accept_upload( array $file ): array {
 		Uploads_Migration_Storage::ensure_storage_ready();
 
+		$error_code = isset( $file['error'] ) ? (int) $file['error'] : UPLOAD_ERR_OK;
+		if ( UPLOAD_ERR_OK !== $error_code ) {
+			$map = array(
+				UPLOAD_ERR_INI_SIZE   => 'The uploaded file exceeds the server upload_max_filesize limit.',
+				UPLOAD_ERR_FORM_SIZE  => 'The uploaded file exceeds the form MAX_FILE_SIZE limit.',
+				UPLOAD_ERR_PARTIAL    => 'The file was only partially uploaded.',
+				UPLOAD_ERR_NO_FILE    => 'No file was uploaded.',
+				UPLOAD_ERR_NO_TMP_DIR => 'Missing a temporary folder on the server.',
+				UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk.',
+				UPLOAD_ERR_EXTENSION  => 'A PHP extension stopped the file upload.',
+			);
+
+			return array(
+				'ok'    => false,
+				'error' => $map[ $error_code ] ?? ( 'Upload failed with error code: ' . $error_code ),
+			);
+		}
+
 		if ( empty( $file['tmp_name'] ) || empty( $file['name'] ) ) {
 			return array( 'ok' => false, 'error' => 'No file uploaded.' );
 		}

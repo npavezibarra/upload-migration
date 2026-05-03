@@ -26,7 +26,16 @@
       headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
       body,
     });
-    const json = await res.json();
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      const snippet = (text || "").slice(0, 180).replace(/\s+/g, " ").trim();
+      throw new Error(
+        `Server returned non-JSON response (often an error page, 413 upload limit, or a PHP fatal). Snippet: ${snippet}`
+      );
+    }
     if (!json || !json.success) {
       throw new Error((json && json.data && json.data.error) || "Request failed");
     }
@@ -44,7 +53,16 @@
       credentials: "same-origin",
       body: form,
     });
-    const json = await res.json();
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      const snippet = (text || "").slice(0, 180).replace(/\s+/g, " ").trim();
+      throw new Error(
+        `Upload returned non-JSON response (often an error page or upload size limit). Snippet: ${snippet}`
+      );
+    }
     if (!json || !json.success) {
       throw new Error((json && json.data && json.data.error) || "Upload failed");
     }
@@ -172,4 +190,3 @@
     if (importBtn) importBtn.addEventListener("click", runImport);
   });
 })();
-
